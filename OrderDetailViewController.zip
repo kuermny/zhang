@@ -1,0 +1,2928 @@
+//
+//  OrderDetailViewController.swift
+//  orderex
+//  已点菜品界面
+//  Created by huangcy on 14/12/9.
+//  Copyright (c) 2014年 深圳万国思迅软件有限公司. All rights reserved.
+//
+
+import UIKit
+
+protocol OrderDetailViewControllerDelegate {
+    
+    ///从OrderDetailViewController返回
+    func orderDetailViewShouldExit(orderDetailView: OrderDetailViewController)
+    
+    ///数据已发生改变，开台，切换桌台，菜品数量改变等，通知点菜界面刷新数据
+    func dataHaveChangedByOrderDetailView(orderDetailView: OrderDetailViewController)
+}
+
+///已点菜品
+class OrderDetailViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UICollectionViewDataSource, UICollectionViewDelegate {
+    
+    @IBOutlet weak var dishTableView: UITableView!
+    @IBOutlet weak var orderFunctionColletionView: UICollectionView!
+    @IBOutlet weak var billAmountLabel: UILabel!
+    @IBOutlet weak var dishCountLabel: UILabel!
+    @IBOutlet weak var queryBillButton: UIButton!
+    
+    @IBOutlet weak var payButton: UIButton!
+    @IBOutlet weak var sendButton: UIButton!
+    
+    var progressViewController: CustomProgressViewController?
+    
+    let dal = Dal.shareInstance()
+    let appDelegate = UIApplication.sharedApplication().delegate as! AppDelegate
+    let orderAction = OrderAction.shareInstance()
+    
+    var orderFunctions = [String]()
+    
+    var delegate: OrderDetailViewControllerDelegate?
+    ///已落单的菜品
+    var remoteOrderdishs = [DishOrder]()
+    
+    var hungalias = "挂起"
+    var callalias = "叫起"
+    
+    var hasQueryBill = false
+    
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        
+        // Do any additional setup after loading the view.
+        var isIPad2 = false
+        if let machine = deviceMachineName() {
+            if machine.positionOf("iPad2") >= 0/* || machine.positionOf("x86_64") >= 0*/ {
+                isIPad2 = true
+            }
+        }
+        
+        if !isIPad2 && (UIDevice.currentDevice().systemVersion as NSString).floatValue >= 8.0 {
+            let blur = UIBlurEffect(style: .ExtraLight)
+            let effectView = UIVisualEffectView(effect: blur)
+            effectView.frame = CGRect(x: 0, y: 0, width: 637, height: 658)
+            self.view.addSubview(effectView)
+            self.view.sendSubviewToBack(effectView)
+        } else {
+            self.view.backgroundColor = UIColor(red: 255/255.0, green: 250/255.0, blue: 240/255.0, alpha: 1.0)
+            self.view.layer.masksToBounds = true
+            self.view.layer.borderWidth = 1.0
+            self.view.layer.borderColor = UIColor.lightGrayColor().colorWithAlphaComponent(0.5).CGColor
+        }
+        
+        hungalias = dal.querySysParam("hungalias", defaultValue: "挂起")
+        callalias = dal.querySysParam("callalias", defaultValue: "叫起")
+        
+        let orderMode = dal.querySysParam("orderMode", defaultValue: "0").toInt()!
+        ///orderFunctions数组中“删菜”必须放在第一个，其它顺序可以随便调整
+        if orderMode == 0 {
+            orderFunctions = ["删菜", "消台", "转台", "并台", "做法", "加料", "\(hungalias)", "\(callalias)", "整单\(hungalias)", "整单\(callalias)", "菜品赠送", "取消赠送", "单品催菜", "整单催菜", "出品划菜", "菜品称重", "沽清菜品", "查看账单", "预打账单", "打印总单", "整单折扣", "台况查询", "临时套菜", "会员信息", "转菜", "预点菜单"]
+        }
+        else if orderMode == 1 {
+            orderFunctions = ["删菜", "消台", "转台", "并台", "做法", "加料", "\(hungalias)", "\(callalias)", "整单\(hungalias)", "整单\(callalias)", "菜品赠送", "取消赠送", "单品催菜", "整单催菜", "出品划菜", "菜品称重", "沽清菜品", "查看账单", "预打账单", "打印总单", "整单折扣", "台况查询", "临时套菜", "客评", "转菜", "预点菜单"]
+            let e = dal.querySysParam("evaluateOn", defaultValue: "0")
+            if e == "0" {
+                if let index = find(orderFunctions, "客评") {
+                    orderFunctions.removeAtIndex(index)
+                }
+            }
+        }
+        else if orderMode == 2 {
+            orderFunctions = ["删菜", "客评", "做法", "加料", "\(hungalias)", "\(callalias)", "整单\(hungalias)", "整单\(callalias)", "单品催菜", "整单催菜", "沽清菜品", "查看账单", "预点菜单"]
+        }
+        else if orderMode == 3 {
+            orderFunctions = ["删菜", "预点菜单"]
+            queryBillButton.hidden = true
+            sendButton.setTitle("下单", forState: UIControlState.Normal)
+            (orderFunctionColletionView.collectionViewLayout as! UICollectionViewFlowLayout).scrollDirection = UICollectionViewScrollDirection.Vertical
+        }
+        
+        updateInfo()
+        if dishTableView.numberOfRowsInSection(0) > 0 {
+            dishTableView.selectRowAtIndexPath(NSIndexPath(forRow: 0, inSection: 0), animated: true, scrollPosition: UITableViewScrollPosition.Top)
+            //refreshFunctionCollectionView(NSIndexPath(forRow: 0, inSection: 0))
+        }
+    }
+    
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        // Dispose of any resources that can be recreated.
+    }
+    
+    //MARK: - external
+    func refresh() {
+        updateInfo()
+        dishTableView.reloadData()
+        if dishTableView.numberOfRowsInSection(0) > 0 {
+            dishTableView.selectRowAtIndexPath(NSIndexPath(forRow: 0, inSection: 0), animated: true, scrollPosition: UITableViewScrollPosition.Top)
+            refreshFunctionCollectionView(NSIndexPath(forRow: 0, inSection: 0))
+        }
+    }
+    
+    func refreshAndRemoveRemoteDishOrder() {
+        remoteOrderdishs.removeAll(keepCapacity: false)
+        refresh()
+    }
+    
+    /*
+    // MARK: - Navigation
+    
+    // In a storyboard-based application, you will often want to do a little preparation before navigation
+    override func prepareForSegue(segue: UIStoryboardSegue, sender: AnyObject?) {
+    // Get the new view controller using segue.destinationViewController.
+    // Pass the selected object to the new view controller.
+    }
+    */
+    @IBAction func onExit(sender: AnyObject) {
+        delegate?.orderDetailViewShouldExit(self)
+    }
+    
+    @IBAction func onQueryBill(sender: AnyObject) {
+        
+        queryBill()
+    }
+    
+    func queryBill() {
+        
+        if appDelegate.tableNo.isEmpty {
+            showSimpleAlertView(self, title: "未开台不能查单", message: nil)
+            return
+        }
+        
+        showProcessView("请稍候", message: "正在下传已点菜品信息...", progressVisiable: false, progress: 0.0)
+        let (result, errMessage) = OrderUtils.shareInstance().queryRemoteBill(appDelegate.tableNo, dishOrders: &remoteOrderdishs)
+        hideProgressView()
+        if !result {
+            remoteOrderdishs.removeAll(keepCapacity: false)
+            showSimpleAlertView(self, title: "查单失败", message: errMessage)
+        } else {
+            hasQueryBill = true
+            refresh()
+            showSimpleAlertView(self, title: "查单成功", message: errMessage)
+        }
+    }
+    
+    @IBAction func onSendBill(sender: AnyObject) {
+        
+        let downloadedData = Dal.shareInstance().querySysParam("downloadedData", defaultValue: "N")
+        if downloadedData == "N" {
+            showSimpleAlertView(self, title: "您还没有下传数据，不能落单", message: "请进入本机管理下传数据后再点菜落单")
+            return
+        }
+        
+        if orderAction.orderDishs.count == 0 {
+            showSimpleAlertView(self, title: "没有找到尚未落单的菜品", message: "不需要落单")
+            return
+        }
+        
+        if appDelegate.tableNo.isEmpty {
+            showSimpleAlertView(self, title: "当前桌台是临时桌台，您需要指定一个桌台才能落单", message: nil)
+            return
+        }
+        
+        let orderMode = dal.querySysParam("orderMode", defaultValue: "0").toInt()!
+        
+        if !hasQueryBill && orderMode != 3 {
+            var dishPresents = [DishPresent]()
+            for order in orderAction.orderDishs {
+                let count = dal.queryDishPresent(order.dishNo, dishSpec: order.dishSpec, dishPresents: &dishPresents)
+                if count > 0 && order.suitFlag != "Y" {
+                    GeneralAlertView.shareInstance().showDestructiveAlertView(self, title: "落单失败", message: "当前点菜存在设置了买赠的菜品，查单后才可以落单", cancelTitle: "取消", confirmTitle: "查单", actionHandler: { (action) -> Void in
+                        
+                        if action == "查单" {
+                            self.queryBill()
+                        }
+                    })
+                    return
+                }
+            }
+        }
+        
+        
+        if orderMode == 3 {//预点菜
+            
+            if let parentController = self.parentViewController {
+                
+                let controller = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("NumberInputViewController") as! NumberInputViewController
+                
+                controller.titleStr = "请输入电话号码作为就餐凭证"
+                controller.placeholder = "请输入电话号码，最长12位"
+                controller.inputType = NumberInputType.phone
+                controller.complateHandler = {
+                    (cancel, inputStr) in
+                    
+                    controller.dismissViewControllerAnimated(true) {
+                        
+                        if cancel {
+                            return
+                        }
+                        
+                        self.sendBill(preOrderCellPhone: inputStr!)
+                    }
+                }
+                
+                controller.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+                parentController.presentViewController(controller, animated: true, completion: nil)
+                
+            } else {
+                debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+            }
+            
+        } else if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    self.sendBill()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            sendBill()
+        }
+    }
+    
+    func sendBill(preOrderCellPhone: String? = nil) {
+        
+        showProcessView("请稍候", message: "正在发送落单数据...")
+        let (result, errMessage) = OrderUtils.shareInstance().sendOrdersToServer(orderAction.orderDishs, operId: appDelegate.operId, preOrderCellPhone: preOrderCellPhone)
+        hideProgressView()
+        
+        if result == 0 {
+            
+            showSimpleAlertView(self, title: "落单成功", message: nil)
+            orderAction.orderDishs.removeAll(keepCapacity: false)
+            self.delegate?.dataHaveChangedByOrderDetailView(self)
+            self.delegate?.orderDetailViewShouldExit(self)
+            
+        } else if result == 1 {
+            
+            showSimpleAlertView(self, title: "落单失败", message: errMessage)
+            
+        } else if result == 2 {
+            
+            GeneralAlertView.shareInstance().showDestructiveAlertView(self, title: "落单失败", message: "未开台不能落单", cancelTitle: "取消", confirmTitle: "开台", actionHandler: { (action) -> Void in
+                if action == "开台" {
+                    if let parentController = self.parentViewController {
+                        
+                        let openTableViewController = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("OpenTableViewController") as! OpenTableViewController
+                        
+                        let oldTableNo = self.appDelegate.tableNo
+                        openTableViewController.completeHandler = {
+                            [unowned self](cancel: Bool) in
+                            
+                            openTableViewController.view.removeFromSuperview()
+                            if !cancel {
+                                if oldTableNo != self.appDelegate.tableNo {
+                                    self.dal.setSysParam("tableNo", value: self.appDelegate.tableNo)
+                                    
+                                    ///改变桌台后需要刷新数据
+                                    if oldTableNo.isEmpty {
+                                        
+                                        self.dal.beginTransaction()
+                                        for dishOrder in self.orderAction.orderDishs {
+                                            dishOrder.tableNo = self.appDelegate.tableNo
+                                            self.dal.updateOrderTableNo(dishOrder)
+                                        }
+                                        self.dal.commitTransaction()
+                                        
+                                    }
+                                    
+                                    self.orderAction.getLocalOrders()
+                                    self.remoteOrderdishs.removeAll(keepCapacity: false)
+                                    self.refresh()
+                                    self.delegate?.dataHaveChangedByOrderDetailView(self)
+                                }
+                                
+                                self.showProcessView("请稍候", message: "正在发送落单数据...")
+                                let (result, errMessage) = OrderUtils.shareInstance().sendOrdersToServer(self.orderAction.orderDishs, operId: self.appDelegate.operId, preOrderCellPhone: preOrderCellPhone)
+                                self.hideProgressView()
+                                
+                                if result == 0 {
+                                    
+                                    showSimpleAlertView(self, title: "落单成功", message: nil)
+                                    self.orderAction.orderDishs.removeAll(keepCapacity: false)
+                                    self.delegate?.dataHaveChangedByOrderDetailView(self)
+                                    self.delegate?.orderDetailViewShouldExit(self)
+                                    
+                                } else if result == 1 {
+                                    
+                                    showSimpleAlertView(self, title: "落单失败", message: errMessage)
+                                    
+                                }
+                            }
+                        }
+                        
+                        parentController.addChildViewController(openTableViewController)
+                        openTableViewController.view.frame = parentController.view.frame
+                        parentController.view.addSubview(openTableViewController.view)
+                        
+                    } else {
+                        debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+                    }
+                }
+            })
+        }
+    }
+    
+    //MARK: 结账
+    @IBAction func onPay(sender: AnyObject) {
+        
+        showMyBill()
+    }
+    
+    //MARK: - 菜品操作
+    ///增加数量
+    func onAddDishQnty(button: UIButton) {
+        
+        let order = orderAction.orderDishs[button.tag]
+        if !checkDishWarn(order, toQnty: order.dishQnty+1) {
+            return
+        }
+        orderAction.updateOrderNum(order, num: order.dishQnty+1.0)
+        
+        updateInfo()
+        dishTableView.reloadData()
+        
+        let section = dishTableView.numberOfSections() == 2 ? 1 : 0
+        if dishTableView.numberOfRowsInSection(section) > button.tag {
+            dishTableView.selectRowAtIndexPath(NSIndexPath(forRow: button.tag, inSection: section), animated: true, scrollPosition: UITableViewScrollPosition.Top)
+            refreshFunctionCollectionView(NSIndexPath(forRow: button.tag, inSection: section))
+        }
+        self.delegate?.dataHaveChangedByOrderDetailView(self)
+    }
+    ///减少数量
+    func onDecDishQnty(button: UIButton) {
+        let order = orderAction.orderDishs[button.tag]
+        orderAction.updateOrderNum(order, num: order.dishQnty-1)
+        
+        self.delegate?.dataHaveChangedByOrderDetailView(self)
+        
+        updateInfo()
+        dishTableView.reloadData()
+        
+        let section = dishTableView.numberOfSections() == 2 ? 1 : 0
+        if dishTableView.numberOfRowsInSection(section) > button.tag {
+            dishTableView.selectRowAtIndexPath(NSIndexPath(forRow: button.tag, inSection: section), animated: true, scrollPosition: UITableViewScrollPosition.Top)
+            refreshFunctionCollectionView(NSIndexPath(forRow: button.tag, inSection: section))
+        }
+    }
+    
+    //MARK: - UITableViewDataSource, UITableViewDelegate
+    func numberOfSectionsInTableView(tableView: UITableView) -> Int {
+        return remoteOrderdishs.count > 0 ? 2 : 1
+    }
+    
+    func tableView(tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        let numberOfSections = tableView.numberOfSections()
+        if numberOfSections == 2 && section == 0 {
+            return remoteOrderdishs.count
+        }
+        return orderAction.orderDishs.count
+    }
+    
+    func tableView(tableView: UITableView, cellForRowAtIndexPath indexPath: NSIndexPath) -> UITableViewCell {
+        
+        let cell = tableView.dequeueReusableCellWithIdentifier("DetailOrderCell", forIndexPath: indexPath) as! DetailOrderCell
+        cell.backgroundColor = UIColor.clearColor()
+        
+        var order: DishOrder
+        let numberOfSections = tableView.numberOfSections()
+        
+        if numberOfSections == 2 && indexPath.section == 0 {
+            order = remoteOrderdishs[indexPath.row]
+            cell.rowNoLabel.text = "\(indexPath.row+1)"
+            cell.addButton.hidden = true
+            cell.decButton.hidden = true
+            
+            cell.dishNameLabel.textColor = UIColor.lightGrayColor()
+            cell.dishQntyButton.setTitleColor(UIColor.lightGrayColor(), forState: UIControlState.Normal)
+            cell.dishMakeMemoLabel.textColor = UIColor.lightGrayColor()
+            cell.statusLabel.textColor = UIColor.lightGrayColor()
+        } else {
+            order = orderAction.orderDishs[indexPath.row]
+            cell.rowNoLabel.text = "\(remoteOrderdishs.count+indexPath.row+1)"
+            if order.suitFlag == "Y" || order.presentFlag == "Y" || order.presentFlag == "A" || order.seatFlag == "S" || order.seatFlag == "B" {
+                cell.addButton.hidden = true
+                cell.decButton.hidden = true
+                cell.dishQntyButton.enabled = false
+            } else {
+                cell.addButton.hidden = false
+                cell.decButton.hidden = false
+                cell.addButton.tag = indexPath.row
+                cell.decButton.tag = indexPath.row
+                cell.addButton.addTarget(self, action: "onAddDishQnty:", forControlEvents: UIControlEvents.TouchUpInside)
+                cell.decButton.addTarget(self, action: "onDecDishQnty:", forControlEvents: UIControlEvents.TouchUpInside)
+                cell.dishQntyButton.enabled = true
+                cell.dishQntyButton.tag = indexPath.row
+                cell.dishQntyButton.addTarget(self, action: "setQnty:", forControlEvents: UIControlEvents.TouchUpInside)
+            }
+            cell.dishNameLabel.textColor = UIColor.blackColor()
+            cell.dishQntyButton.setTitleColor(UIColor.flatBlueColor(), forState: UIControlState.Normal)
+            cell.dishMakeMemoLabel.textColor = UIColor.blackColor()
+            cell.statusLabel.textColor = UIColor.blackColor()
+        }
+        var tipStr = ""
+        if order.suitFlag == "Y" {
+            tipStr = tipStr + "[套]"
+        }
+        if order.seatFlag == "S" {
+            tipStr = tipStr + "[吃]"
+        }
+        if order.seatFlag == "B" {
+            tipStr = tipStr + "[拼]"
+        }
+        if order.editnumFlag == "Y" {
+            tipStr = tipStr + "[称]"
+        }
+        if order.curFlag == "Y" {
+            tipStr = tipStr + "[时]"
+        }
+        if order.presentFlag == "Y" || order.presentFlag == "A" {
+            tipStr = tipStr + "[赠]"
+        }
+        
+        var dishName = tipStr + (order.dishSpec.isEmpty ? order.dishName : "\(order.dishName)(\(order.dishSpec))")
+        cell.dishNameLabel.text = dishName
+        
+        if order.isCommit {
+            cell.statusLabel.text = "\(order.dishState)"
+        } else {
+            if order.suspendFlag == "Y" {
+                cell.statusLabel.text = "未落单(挂)"
+            } else {
+                cell.statusLabel.text = "未落单"
+            }
+        }
+        
+        var qntyStr = formatDecimal(order.dishQnty)
+        cell.dishQntyButton.setTitle(qntyStr, forState: UIControlState.Normal)
+        
+        if order.presentFlag == "Y" || order.presentFlag == "A" {
+            cell.dishAmountLabel.text = formatDecimal(0)
+        } else if order.suitFlag == "Y" {
+            cell.dishAmountLabel.text = formatDecimal(order.addPrice + order.suitAddPrice)
+        } else {
+            cell.dishAmountLabel.text = formatDecimal(order.addPrice + order.dishQnty * order.salePrice)
+        }
+        if order.presentFlag == "Y" || order.presentFlag == "A" {
+            cell.dishAmountLabel.textColor = UIColor.blackColor()
+        } else {
+            cell.dishAmountLabel.textColor = UIColor.redColor()
+        }
+        
+        var makeStr = ""
+        if order.makeMemos.count > 0 {
+            makeStr = "做法:"
+            for makeMemo in order.makeMemos {
+                var makeName : String
+                if makeMemo.addPrice > 0 && dal.checkWhetherMakeMemoCanChangeQnty(makeMemo.makeId) {
+                    makeName = "\(makeMemo.makeMemo)(\(formatDecimal(makeMemo.qnty)) x ¥\(formatDecimal(makeMemo.addPrice)))"
+                } else if makeMemo.addPrice > 0 {
+                    makeName = "\(makeMemo.makeMemo)(¥\(formatDecimal(makeMemo.addPrice)))"
+                } else if dal.checkWhetherMakeMemoCanChangeQnty(makeMemo.makeId) {
+                    makeName = "\(makeMemo.makeMemo)(\(formatDecimal(makeMemo.qnty)))"
+                } else {
+                    makeName = makeMemo.makeMemo
+                }
+                makeStr = "\(makeStr) \(makeName)"
+            }
+        }
+        if order.materials.count > 0 {
+            if makeStr.isEmpty {
+                makeStr = "加料:"
+            } else {
+                makeStr = makeStr + ";  加料:"
+            }
+            for makeMemo in order.materials {
+                var makeName : String
+                if makeMemo.addPrice > 0 {
+                    makeName = "\(makeMemo.makeMemo)(\(formatDecimal(makeMemo.qnty)) x ¥\(formatDecimal(makeMemo.addPrice)))"
+                } else if dal.checkWhetherMakeMemoCanChangeQnty(makeMemo.makeId) {
+                    makeName = "\(makeMemo.makeMemo)(\(formatDecimal(makeMemo.qnty)))"
+                } else {
+                    makeName = makeMemo.makeMemo
+                }
+                makeStr = "\(makeStr) \(makeName)"
+            }
+        }
+        cell.dishMakeMemoLabel.text = makeStr
+        
+        return cell
+    }
+    
+    func tableView(tableView: UITableView, heightForRowAtIndexPath indexPath: NSIndexPath) -> CGFloat {
+        
+        var order: DishOrder
+        let numberOfSections = tableView.numberOfSections()
+        if numberOfSections == 2 && indexPath.section == 0 {
+            order = remoteOrderdishs[indexPath.row]
+        } else {
+            order = orderAction.orderDishs[indexPath.row]
+        }
+        if order.makeMemos.count > 0 || order.materials.count > 0 {
+            return 88
+        }
+        return 58
+    }
+    
+    func tableView(tableView: UITableView, didSelectRowAtIndexPath indexPath: NSIndexPath) {
+        
+        let numberOfSections = tableView.numberOfSections()
+        if !(numberOfSections == 2 && indexPath.section == 0) {//未落单
+            
+            orderFunctions[0] = "删菜"
+            orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: 0, inSection: 0)])
+            
+            if indexPath.row >= orderAction.orderDishs.count {
+                return
+            }
+            let order = orderAction.orderDishs[indexPath.row]
+            if order.suspendFlag == "Y" {
+                if let index = find(orderFunctions, hungalias) {
+                    orderFunctions[index] = "取消\(hungalias)"
+                    orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: index, inSection: 0)])
+                }
+            } else {
+                if let index = find(orderFunctions, "取消\(hungalias)") {
+                    orderFunctions[index] = hungalias
+                    orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: index, inSection: 0)])
+                }
+            }
+        } else {//已落单
+            
+            orderFunctions[0] = "退菜"
+            orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: 0, inSection: 0)])
+            
+            if let index = find(orderFunctions, "取消\(hungalias)") {
+                orderFunctions[index] = hungalias
+                orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: index, inSection: 0)])
+            }
+        }
+    }
+    
+    func tableView(tableView: UITableView, canEditRowAtIndexPath indexPath: NSIndexPath) -> Bool {
+        
+        var order: DishOrder
+        let numberOfSections = tableView.numberOfSections()
+        if !(numberOfSections == 2 && indexPath.section == 0) {
+            if indexPath.row >= orderAction.orderDishs.count {
+                return false
+            }
+            order = orderAction.orderDishs[indexPath.row]
+        } else {
+            if indexPath.row >= remoteOrderdishs.count {
+                return false
+            }
+            order = remoteOrderdishs[indexPath.row]
+        }
+        
+        if order.suitFlag == "Y" {
+            return false
+        }
+        if order.seatFlag == "S" {
+            return false
+        }
+        if order.seatFlag == "B" {
+            return false
+        }
+        if order.presentFlag == "A" {
+            return false
+        }
+        
+        return true
+    }
+    
+    func tableView(tableView: UITableView, commitEditingStyle editingStyle: UITableViewCellEditingStyle, forRowAtIndexPath indexPath: NSIndexPath) {
+        
+        if tableView == dishTableView {
+            if editingStyle == UITableViewCellEditingStyle.Delete {
+                deleteDish(indexPath: indexPath)
+            }
+        }
+    }
+    
+    func tableView(tableView: UITableView, titleForDeleteConfirmationButtonForRowAtIndexPath indexPath: NSIndexPath) -> String! {
+        
+        if tableView == dishTableView {
+            let numberOfSections = tableView.numberOfSections()
+            if !(numberOfSections == 2 && indexPath.section == 0) {
+                return "删菜"
+            } else {
+                return "退菜"
+            }
+        }
+        return "删除"
+    }
+    
+    //MARK: - UICollectionViewDataSource, UICollectionViewDelegate
+    func collectionView(collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        return orderFunctions.count
+    }
+    
+    func collectionView(collectionView: UICollectionView, cellForItemAtIndexPath indexPath: NSIndexPath) -> UICollectionViewCell {
+        
+        let cell = collectionView.dequeueReusableCellWithReuseIdentifier("OrderDishFunctionCell", forIndexPath: indexPath) as! OrderDishFunctionCell
+        
+        cell.functionButton.setTitle(orderFunctions[indexPath.row], forState: UIControlState.Normal)
+        cell.functionButton.addTarget(self, action: "onOrderFunctionButtonTouch:", forControlEvents: UIControlEvents.TouchUpInside)
+        
+        return cell
+    }
+    
+    //MARK: - 功能操作
+    ///选中了功能按钮
+    func onOrderFunctionButtonTouch(button: UIButton) {
+        
+        debugPrintln(button.currentTitle)
+        
+        let title = button.currentTitle
+        
+        if (title == nil) {
+            return;
+        }
+        switch title! {
+        case "消台":
+            cancelOpenTable()
+        case "转台":
+            exChangeOrMergeTable(0)
+        case "并台":
+            exChangeOrMergeTable(1)
+        case "台况查询":
+            queryTableState()
+        case "删菜", "退菜":
+            deleteDish()
+        case "做法":
+            pickMemoMaterial(MakePickerType.MakeMemo)
+        case "加料":
+            pickMemoMaterial(MakePickerType.Material)
+        case "沽清菜品":
+            showDishWarn()
+        case "菜品赠送":
+            presentDish(0)
+        case "取消赠送":
+            presentDish(1)
+        case hungalias:
+            suspendOneDish()
+        case "取消\(hungalias)":
+            suspendOneDish()
+        case "整单\(hungalias)":
+            suspendAllDish()
+        case callalias:
+            callUpOneDish()
+        case "整单\(callalias)":
+            callUpAllDish()
+        case "单品催菜":
+            speedUpOneDish()
+        case "整单催菜":
+            speedUpAllDish()
+        case "菜品称重":
+            dishWeight()
+        case "整单折扣":
+            billDiscount()
+        case "出品划菜":
+            orderServing()
+        case "转菜":
+            moveDish()
+        case "临时套菜":
+            createTempSuit()
+        case "查看账单":
+            showMyBill()
+        case "预打账单":
+            prePrintBill()
+        case "打印总单":
+            printTotalBill()
+        case "客评":
+            evaluate()
+        case "预点菜单":
+            loadPreOrderBill()
+        case "会员信息":
+            memberQuery()
+        default:
+            break;
+        }
+        
+        /*if title == "消台" {
+            cancelOpenTable()
+        case "转台" {
+            exChangeOrMergeTable(0)
+        } else if title == "并台" {
+            exChangeOrMergeTable(1)
+        } else if title == "台况查询" {
+            queryTableState()
+        } else if title == "删菜" || title == "退菜" {
+            deleteDish()
+        } else if title == "做法" {
+            pickMemoMaterial(MakePickerType.MakeMemo)
+        } else if title == "加料" {
+            pickMemoMaterial(MakePickerType.Material)
+        } else if title == "沽清菜品" {
+            showDishWarn()
+        } else if title == "菜品赠送" {
+            presentDish(0)
+        } else if title == "取消赠送" {
+            presentDish(1)
+        } else if title == hungalias {
+            suspendOneDish()
+        } else if title == "取消\(hungalias)" {
+            suspendOneDish()
+        } else if title == "整单\(hungalias)" {
+            suspendAllDish()
+        } else if title == callalias {
+            callUpOneDish()
+        } else if title == "整单\(callalias)" {
+            callUpAllDish()
+        } else if title == "单品催菜" {
+            speedUpOneDish()
+        } else if title == "整单催菜" {
+            speedUpAllDish()
+        } else if title == "菜品称重" {
+            dishWeight()
+        } else if title == "整单折扣" {
+            billDiscount()
+        } else if title == "出品划菜" {
+            orderServing()
+        } else if title == "转菜" {
+            moveDish()
+        } else if title == "临时套菜" {
+            createTempSuit()
+        } else if title == "查看账单" {
+            showMyBill()
+        } else if title == "预打账单" {
+            prePrintBill()
+        } else if title == "打印总单" {
+            printTotalBill()
+        } else if title == "客评" {
+            evaluate()
+        } else if title == "预点菜单" {
+            loadPreOrderBill()
+        } else if title == "会员信息" {
+            memberQuery()
+        }*/
+    }
+    
+    ///MARK: 设置点菜数量
+    func setQnty(sender: UIButton!) {
+        
+        let order = self.orderAction.orderDishs[sender.tag]
+        
+        let section = self.dishTableView.numberOfSections() == 2 ? 1 : 0
+        if self.dishTableView.numberOfRowsInSection(section) > sender.tag {
+            self.dishTableView.selectRowAtIndexPath(NSIndexPath(forRow: sender.tag, inSection: section), animated: true, scrollPosition: UITableViewScrollPosition.Top)
+            refreshFunctionCollectionView(NSIndexPath(forRow: sender.tag, inSection: section))
+        }
+        
+        if order.suitFlag == "Y" {
+            showSimpleAlertView(self, title: "套菜子菜不能单独修改数量", message: nil)
+            return
+        }
+        if order.presentFlag == "A" {
+            showSimpleAlertView(self, title: "买赠菜品不能单独修改数量", message: nil)
+            return
+        }
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("NumberInputViewController") as! NumberInputViewController
+            
+            controller.titleStr = "设置点菜数量"
+            controller.placeholder = "请输入点菜数量，最大数量999"
+            controller.maxValue = 999
+            controller.complateHandler = {
+                (cancel, inputStr) in
+                
+                
+                controller.dismissViewControllerAnimated(true) {
+                    
+                    if cancel {
+                        return
+                    }
+                    
+                    let qnty = inputStr!.doubleValue!
+                    if self.dal.queryDishUnitType(order.unitNo) == "1" {
+                        if qnty - Double(Int(qnty)) != 0.0  {
+                            showSimpleAlertView(self, title: "\(order.dishName)的单位类型不支持小数", message: nil)
+                            return
+                        }
+                    }
+                    if !self.checkDishWarn(order, toQnty: qnty) {
+                        return
+                    }
+                    self.orderAction.updateOrderNum(order, num: qnty)
+                    self.updateInfo()
+                    self.dishTableView.reloadData()
+                    let section = self.dishTableView.numberOfSections() == 2 ? 1 : 0
+                    if self.dishTableView.numberOfRowsInSection(section) > sender.tag {
+                        self.dishTableView.selectRowAtIndexPath(NSIndexPath(forRow: sender.tag, inSection: section), animated: true, scrollPosition: UITableViewScrollPosition.Top)
+                        self.refreshFunctionCollectionView(NSIndexPath(forRow: sender.tag, inSection: section))
+                    }
+                    self.delegate?.dataHaveChangedByOrderDetailView(self)
+                }
+            }
+            
+            controller.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+            parentController.presentViewController(controller, animated: true, completion: nil)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    ///MARK: 删除
+    func deleteDish(var indexPath: NSIndexPath? = nil) {
+        
+        if indexPath == nil {
+            indexPath = dishTableView.indexPathForSelectedRow()
+            if indexPath == nil {
+                showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+                return
+            }
+        }
+        
+        var order: DishOrder
+        
+        let numberOfSections = dishTableView.numberOfSections()
+        if numberOfSections == 2 && indexPath!.section == 0 {
+            order = remoteOrderdishs[indexPath!.row]
+        } else {
+            order = orderAction.orderDishs[indexPath!.row]
+        }
+        
+        var tipStr: String
+        if order.isCommit {
+            tipStr = "退菜"
+        } else {
+            tipStr = "删菜"
+        }
+        
+        if order.suitFlag == "Y" {
+            showSimpleAlertView(self, title: "套菜子菜不能单独\(tipStr)", message: nil)
+            return
+        }
+        if order.seatFlag == "S" {
+            showSimpleAlertView(self, title: "一品多吃子菜不能单独\(tipStr)", message: nil)
+            return
+        }
+        if order.seatFlag == "B" {
+            showSimpleAlertView(self, title: "拼菜子菜不能单独\(tipStr)", message: nil)
+            return
+        }
+        if order.presentFlag == "A" {
+            showSimpleAlertView(self, title: "买赠菜品不能单独\(tipStr)", message: nil)
+            return
+        }
+        
+        if numberOfSections == 2 && indexPath!.section == 0 { //已落单为退菜
+            
+            if let parentController = self.parentViewController {
+                
+                let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("ReturnDishViewController") as! ReturnDishViewController
+                
+                controller.order = order
+                controller.completeHandler = {
+                    [unowned self](cancel: Bool) in
+                    
+                    controller.view.removeFromSuperview()
+                    if !cancel {
+                        
+                        ///退菜后刷新沽清菜品
+                        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), { [unowned self]() -> Void in
+                            OrderUtils.shareInstance().queryDishWarm(nil){(result: Bool, errMessage: String?, warns:[DishWarn]?) in}
+                        })
+                        ///重新查单
+                        self.showProcessView("请稍候", message: "退菜已成功，正在重新查单...", progressVisiable: false, progress: 0.0)
+                        let (result, errMessage) = OrderUtils.shareInstance().queryRemoteBill(self.appDelegate.tableNo, dishOrders: &self.remoteOrderdishs)
+                        self.hideProgressView()
+                        if !result {
+                            self.remoteOrderdishs.removeAll(keepCapacity: false)
+                            showSimpleAlertView(self, title: "退菜已成功，但重新查单失败", message: errMessage)
+                        } else {
+                            self.refresh()
+                            showSimpleAlertView(self, title: "操作成功", message: errMessage)
+                        }
+                    }
+                }
+                
+                parentController.addChildViewController(controller)
+                controller.view.frame = parentController.view.frame
+                parentController.view.addSubview(controller.view)
+                
+            } else {
+                debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+            }
+            
+            
+        } else {
+            orderAction.updateOrderNum(order, num: 0)
+            self.refresh()
+            self.delegate?.dataHaveChangedByOrderDetailView(self)
+        }
+    }
+    
+    ///MARK: 转台
+    ///actionType: 0 转台 1 并台
+    func exChangeOrMergeTable(actionType: Int) {
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("ExchangeOrMergeTableViewController") as! ExchangeOrMergeTableViewController
+            
+            let oldTableNo = appDelegate.tableNo
+            controller.actionType = actionType
+            controller.completeHandler = {
+                [unowned self](cancel: Bool) in
+                
+                controller.view.removeFromSuperview()
+                if !cancel {
+                    if oldTableNo != self.appDelegate.tableNo {
+                        self.dal.setSysParam("tableNo", value: self.appDelegate.tableNo)
+                        
+                        ///改变桌台后需要刷新数据
+                        self.orderAction.getLocalOrders()
+                        self.remoteOrderdishs.removeAll(keepCapacity: false)
+                        self.refresh()
+                        self.delegate?.dataHaveChangedByOrderDetailView(self)
+                    }
+                    showSimpleAlertView(self, title: "操作成功", message: nil)
+                }
+            }
+            
+            parentController.addChildViewController(controller)
+            controller.view.frame = parentController.view.frame
+            parentController.view.addSubview(controller.view)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    ///MARK: 消台
+    func cancelOpenTable() {
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("CancelOpenTableViewController") as! CancelOpenTableViewController
+            
+            controller.completeHandler = {
+                [unowned self](cancel: Bool) in
+                
+                controller.view.removeFromSuperview()
+                if !cancel {
+                    showSimpleAlertView(self, title: "操作成功", message: nil)
+                }
+            }
+            
+            parentController.addChildViewController(controller)
+            controller.view.frame = parentController.view.frame
+            parentController.view.addSubview(controller.view)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+        
+    }
+    
+    ///MARK: 台况查询
+    func queryTableState() {
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("ScanTableStateViewController") as! ScanTableStateViewController
+            
+            controller.complateHandler = {
+                parentController.dismissViewControllerAnimated(true, completion: nil)
+            }
+            
+            controller.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+            parentController.presentViewController(controller, animated: true, completion: nil)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    ///MARK: 做法加料
+    func pickMemoMaterial(type: MakePickerType) {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        
+        let numberOfSections = dishTableView.numberOfSections()
+        if numberOfSections == 2 && indexPath!.section == 0 {
+            showSimpleAlertView(self, title: "已落单的菜品不能选择做法和加料", message: nil)
+            return
+        }
+        
+        let order = orderAction.orderDishs[indexPath!.row]
+        if order.suitFlag == "P" {
+            showSimpleAlertView(self, title: "套菜主菜不能选择做法和加料", message: nil)
+            return
+        }
+        
+        if let parentController = self.parentViewController {
+            
+            let makePickerViewController = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("MakePickerViewController") as! MakePickerViewController
+            
+            makePickerViewController.pickerType = type
+            makePickerViewController.orderIndex = indexPath!.row
+            makePickerViewController.completeHandler = {(cancel: Bool) in
+                
+                parentController.dismissViewControllerAnimated(true, completion: nil)
+                if !cancel {
+                    let indexPath = self.dishTableView.indexPathForSelectedRow()
+                    self.dishTableView.reloadData()
+                    self.updateInfo()
+                    if indexPath != nil {
+                        self.dishTableView.selectRowAtIndexPath(indexPath!, animated: true, scrollPosition: UITableViewScrollPosition.Top)
+                        self.refreshFunctionCollectionView(indexPath!)
+                    }
+                }
+            }
+            
+            makePickerViewController.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+            parentController.presentViewController(makePickerViewController, animated: true, completion: nil)
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    ///MARK: 菜品赠送
+    //type: 0 - 赠送 1 - 取消赠送
+    func presentDish(type: Int) {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        var order: DishOrder
+        let numberOfSections = dishTableView.numberOfSections()
+        if numberOfSections == 2 && indexPath!.section == 0 {
+            order = remoteOrderdishs[indexPath!.row]
+        } else {
+            order = orderAction.orderDishs[indexPath!.row]
+        }
+        
+        if order.presentFlag == "A" {
+            showSimpleAlertView(self, title: "买赠菜品不能手动赠送或取消赠送", message: nil)
+            return
+        }
+        
+        if type == 0 && order.presentFlag == "Y" {
+            showSimpleAlertView(self, title: "已赠送的菜品不能再赠送", message: nil)
+            return
+        }
+        
+        if type == 1 && order.presentFlag != "Y" {
+            showSimpleAlertView(self, title: "还没有赠送的菜品不能取消赠送", message: nil)
+            return
+        }
+        
+        let presentTask: () -> Void = {
+            if order.isCommit {
+                
+                self.showProcessView("请稍后...", message: "正在发送数据...", progressVisiable: false, progress: 0)
+                let (result, errMessage) = OrderUtils.shareInstance().dishPresentToServer(&order, operId: self.appDelegate.operId)
+                self.hideProgressView()
+                if !result {
+                    showSimpleAlertView(self, title: "操作失败", message: errMessage)
+                } else {
+                    showSimpleAlertView(self, title: "操作成功", message: nil)
+                    self.dishTableView.reloadData()
+                    self.updateInfo()
+                    self.dishTableView.selectRowAtIndexPath(indexPath!, animated: true, scrollPosition: UITableViewScrollPosition.Top)
+                    self.refreshFunctionCollectionView(indexPath!)
+                }
+            } else {
+                
+                let flag = order.presentFlag == "Y" ? "N" : "Y"
+                let operId = order.presentFlag == "Y" ? "" : self.appDelegate.operId
+                
+                order.presentFlag = flag
+                order.presentOperId = operId
+                self.dal.updateOrderPresentFlag(order)
+                
+                if order.suitFlag == "P" {
+                    
+                    self.dal.beginTransaction()
+                    for var index = indexPath!.row+1; index < self.orderAction.orderDishs.count; ++index {
+                        self.orderAction.orderDishs[index].presentFlag = flag
+                        self.orderAction.orderDishs[index].presentOperId = operId
+                        self.dal.updateOrderPresentFlag(self.orderAction.orderDishs[index])
+                    }
+                    self.dal.commitTransaction()
+                }
+                
+                showSimpleAlertView(self, title: "操作成功", message: nil)
+                self.dishTableView.reloadData()
+                self.updateInfo()
+                self.dishTableView.selectRowAtIndexPath(indexPath!, animated: true, scrollPosition: UITableViewScrollPosition.Top)
+                self.refreshFunctionCollectionView(indexPath!)
+            }
+        }
+        
+        let loginTask: (profile: Bool) -> Void = {
+            (profile) in
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            var saveOperId = ""
+            var savePasswd = ""
+            if profile {
+                saveOperId = self.appDelegate.operId
+                savePasswd = self.appDelegate.passwd
+            }
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    
+                    if !self.dal.checkWhetherOperPurview(self.appDelegate.operId, purview: "0715") {
+                        showSimpleAlertView(self, title: "当前操作员没有赠送权限", message: nil)
+                        return
+                    } else {
+                        presentTask()
+                        if profile {
+                            self.appDelegate.operId = saveOperId
+                            self.appDelegate.passwd = savePasswd
+                        }
+                    }
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            loginTask(profile: false)
+            return
+            
+        } else {
+            
+            if !self.dal.checkWhetherOperPurview(self.appDelegate.operId, purview: "0715") {
+                GeneralAlertView.shareInstance().showConfirmAlertView(self, title: "当前操作员没有赠送权限, 按确定选择其它操作员登录授权", message: nil, actionHandler: { (action) -> Void in
+                    if action == "确定" {
+                        loginTask(profile: true)
+                    }
+                })
+                return
+            }
+        }
+        
+        presentTask()
+    }
+    
+    //MARK: 单品挂起 取消挂起
+    func suspendOneDish() {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        let numberOfSections = dishTableView.numberOfSections()
+        if numberOfSections == 2 && indexPath!.section == 0 {
+            
+            showSimpleAlertView(self, title: "已落单菜品不能\(hungalias)或取消\(hungalias)", message: nil)
+            return
+        }
+        
+        var order = orderAction.orderDishs[indexPath!.row]
+        
+        let suspendTask: () -> Void = {
+            
+            let flag = order.suspendFlag == "N" ? "Y" : "N"
+            order.suspendFlag = flag
+            
+            //套菜主菜
+            if order.suitFlag == "P" {
+                for var index = indexPath!.row+1; index < self.orderAction.orderDishs.count; ++index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.suitFlag == "Y" {
+                        dishOrder.suspendFlag = flag
+                    } else {
+                        break
+                    }
+                }
+            }
+            //一品多吃主菜
+            if order.seatFlag == "E" {
+                for var index = indexPath!.row+1; index < self.orderAction.orderDishs.count; ++index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.seatFlag == "S" {
+                        dishOrder.suspendFlag = flag
+                    } else {
+                        break
+                    }
+                }
+            }
+            //拼菜主菜
+            if order.seatFlag == "A" {
+                for var index = indexPath!.row+1; index < self.orderAction.orderDishs.count; ++index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.seatFlag == "B" {
+                        dishOrder.suspendFlag = flag
+                    } else {
+                        break
+                    }
+                }
+            }
+            
+            //套菜子菜
+            /*if order.suitFlag == "Y" {
+                //向后找
+                for var index = indexPath!.row+1; index < self.orderAction.orderDishs.count; ++index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.suitFlag == "Y" {
+                        dishOrder.suspendFlag = flag
+                    } else {
+                        break
+                    }
+                }
+                //往前找
+                for var index = indexPath!.row-1; index >= 0; --index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    dishOrder.suspendFlag = flag
+                    if dishOrder.suitFlag == "P" {
+                        break
+                    }
+                }
+            }*/
+            
+            //一品多吃子菜
+            if order.seatFlag == "S" {
+                //向后找
+                for var index = indexPath!.row+1; index < self.orderAction.orderDishs.count; ++index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.seatFlag == "S" {
+                        dishOrder.suspendFlag = flag
+                    } else {
+                        break
+                    }
+                }
+                //往前找
+                for var index = indexPath!.row-1; index >= 0; --index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    dishOrder.suspendFlag = flag
+                    if dishOrder.seatFlag == "E" {
+                        break
+                    }
+                }
+            }
+            
+            //拼菜子菜
+            if order.seatFlag == "B" {
+                //向后找
+                for var index = indexPath!.row+1; index < self.orderAction.orderDishs.count; ++index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.seatFlag == "B" {
+                        dishOrder.suspendFlag = flag
+                    } else {
+                        break
+                    }
+                }
+                //往前找
+                for var index = indexPath!.row-1; index >= 0; --index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    dishOrder.suspendFlag = flag
+                    if dishOrder.seatFlag == "A" {
+                        break
+                    }
+                }
+            }
+            
+            self.dishTableView.reloadData()
+            self.dishTableView.selectRowAtIndexPath(indexPath, animated: false, scrollPosition: UITableViewScrollPosition.Top)
+            self.refreshFunctionCollectionView(indexPath!)
+            if let index = find(self.orderFunctions, self.hungalias) {
+                if order.suspendFlag == "Y" {
+                    self.orderFunctions[index] = "取消\(self.hungalias)"
+                } else {
+                    self.orderFunctions[index] = self.hungalias
+                }
+            } else if let index = find(self.orderFunctions, "取消\(self.hungalias)") {
+                if order.suspendFlag == "Y" {
+                    self.orderFunctions[index] = "取消\(self.hungalias)"
+                } else {
+                    self.orderFunctions[index] = self.hungalias
+                }
+            }
+            self.orderFunctionColletionView.reloadData()
+        }
+        
+        let loginTask: (profile: Bool) -> Void = {
+            (profile) in
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            var saveOperId = ""
+            var savePasswd = ""
+            if profile {
+                saveOperId = self.appDelegate.operId
+                savePasswd = self.appDelegate.passwd
+            }
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    
+                    if !self.dal.checkWhetherOperPurview(self.appDelegate.operId, purview: SuspendPurviewNo) {
+                        showSimpleAlertView(self, title: "当前操作员没有\(self.hungalias)权限", message: nil)
+                        return
+                    } else {
+                        suspendTask()
+                        if profile {
+                            self.appDelegate.operId = saveOperId
+                            self.appDelegate.passwd = savePasswd
+                        }
+                    }
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            loginTask(profile: false)
+            return
+            
+        } else {
+            
+            let orderMode = dal.querySysParam("orderMode", defaultValue: "0").toInt()!
+            
+            if orderMode != 2 && !self.dal.checkWhetherOperPurview(self.appDelegate.operId, purview: SuspendPurviewNo) {
+                GeneralAlertView.shareInstance().showConfirmAlertView(self, title: "当前操作员没有\(self.hungalias)权限, 按确定选择其它操作员登录授权", message: nil, actionHandler: { (action) -> Void in
+                    if action == "确定" {
+                        loginTask(profile: true)
+                    }
+                })
+                return
+            }
+        }
+        
+        suspendTask()
+    }
+    
+    //MARK: 单品叫起
+    func callUpOneDish() {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        let numberOfSections = dishTableView.numberOfSections()
+        if !(numberOfSections == 2 && indexPath!.section == 0) {
+            
+            showSimpleAlertView(self, title: "未落单菜品不能\(callalias)", message: nil)
+            return
+        }
+        
+        var order = remoteOrderdishs[indexPath!.row]
+        
+        let callTask: () -> Void = {
+            
+            self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+            let (result, errMessage) = OrderUtils.shareInstance().doCallOneToServer(self.appDelegate.tableNo, order: order, operId: self.appDelegate.operId)
+            
+            if !result {
+                
+                self.hideProgressView()
+                showSimpleAlertView(self, title: "\(self.callalias)失败", message: errMessage)
+            } else {
+                
+                self.showProcessView("请稍候", message: "正在更新数据...", progressVisiable: false, progress: 0.0)
+                let (result, errMessage) = OrderUtils.shareInstance().queryRemoteBill(self.appDelegate.tableNo, dishOrders: &self.remoteOrderdishs)
+                
+                self.hideProgressView()
+                if !result {
+                    self.remoteOrderdishs.removeAll(keepCapacity: false)
+                    showSimpleAlertView(self, title: "\(self.callalias)已成功，但更新已点菜品信息失败", message: errMessage)
+                } else {
+                    self.dishTableView.reloadData()
+                    self.updateInfo()
+                    self.dishTableView.selectRowAtIndexPath(indexPath!, animated: true, scrollPosition: UITableViewScrollPosition.Top)
+                    self.refreshFunctionCollectionView(indexPath!)
+                    showSimpleAlertView(self, title: "\(self.callalias)成功", message: errMessage)
+                }
+            }
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    callTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            callTask()
+        }
+    }
+    
+    //MARK: 整单叫起
+    func callUpAllDish() {
+        
+        let callTask: () -> Void = {
+            
+            self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+            let (result, errMessage) = OrderUtils.shareInstance().doCallAllToServer(self.appDelegate.tableNo, operId: self.appDelegate.operId)
+            if !result {
+                
+                self.hideProgressView()
+                showSimpleAlertView(self, title: "\(self.callalias)失败", message: errMessage)
+            } else {
+                
+                self.showProcessView("请稍候", message: "正在更新数据...", progressVisiable: false, progress: 0.0)
+                let (result, errMessage) = OrderUtils.shareInstance().queryRemoteBill(self.appDelegate.tableNo, dishOrders: &self.remoteOrderdishs)
+                
+                self.hideProgressView()
+                if !result {
+                    self.remoteOrderdishs.removeAll(keepCapacity: false)
+                    showSimpleAlertView(self, title: "\(self.callalias)成功，但更新已点菜品信息失败", message: errMessage)
+                } else {
+                    self.refresh()
+                    showSimpleAlertView(self, title: "\(self.callalias)成功", message: errMessage)
+                }
+            }
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    callTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            callTask()
+        }
+    }
+    
+    //MARK: 整单挂起
+    func suspendAllDish() {
+        
+//        if orderAction.orderDishs.count == 0 {
+//            showSimpleAlertView(self, title: "没有找到尚未落单的菜品", message: "不能整单\(self.hungalias)")
+//            return
+//        }
+//        
+//        if appDelegate.tableNo.isEmpty {
+//            showSimpleAlertView(self, title: "当前桌台是临时桌台，您需要指定一个桌台才能整单\(self.hungalias)", message: nil)
+//            return
+//        }
+        
+        let suspendTask: () -> Void = {
+            
+            for dishOrder in self.orderAction.orderDishs {
+                dishOrder.suspendFlag = "Y"
+            }
+            self.refresh()
+//            self.showProcessView("请稍候", message: "正在发送数据...")
+//            let (result, errMessage) = OrderUtils.shareInstance().sendOrdersToServer(self.orderAction.orderDishs, operId: self.appDelegate.operId)
+//            self.hideProgressView()
+//            if result == 0 {
+//                showSimpleAlertView(self, title: "整单\(self.hungalias)并落单成功", message: nil)
+//                self.orderAction.orderDishs.removeAll(keepCapacity: false)
+//                self.delegate?.dataHaveChangedByOrderDetailView(self)
+//                self.delegate?.orderDetailViewShouldExit(self)
+//            } else if result == 1 {
+//                showSimpleAlertView(self, title: "整单\(self.hungalias)后落单失败", message: errMessage)
+//            } else if result == 2 {
+//                showSimpleAlertView(self, title: "整单\(self.hungalias)后落单失败", message: "未开台不能落单")
+//            }
+        }
+        
+        let loginTask: () -> Void = {
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    
+                    if !self.dal.checkWhetherOperPurview(self.appDelegate.operId, purview: SuspendPurviewNo) {
+                        showSimpleAlertView(self, title: "当前操作员没有\(self.hungalias)权限", message: nil)
+                        return
+                    } else {
+                        suspendTask()
+                    }
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            loginTask()
+            return
+            
+        } else {
+            
+            let orderMode = dal.querySysParam("orderMode", defaultValue: "0").toInt()!
+            if orderMode != 2 && !self.dal.checkWhetherOperPurview(self.appDelegate.operId, purview: SuspendPurviewNo) {
+                GeneralAlertView.shareInstance().showConfirmAlertView(self, title: "当前操作员没有\(self.hungalias)权限, 按确定选择其它操作员登录授权", message: nil, actionHandler: { (action) -> Void in
+                    if action == "确定" {
+                        loginTask()
+                    }
+                })
+                return
+            }
+        }
+        
+        suspendTask()
+        
+    }
+    
+    ///MARK: 单品催菜
+    func speedUpOneDish() {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        let numberOfSections = dishTableView.numberOfSections()
+        if !(numberOfSections == 2 && indexPath!.section == 0) {
+            
+            showSimpleAlertView(self, title: "未落单菜品不能催菜", message: nil)
+            return
+        }
+        
+        let order = remoteOrderdishs[indexPath!.row]
+        if order.suspendFlag == "Y" {
+            showSimpleAlertView(self, title: "已挂起菜品不能催菜", message: nil)
+            return
+        }
+        
+        if order.dishState == "已出品" || order.dishState == "已划菜" {
+            showSimpleAlertView(self, title: "已出品菜品不能催菜", message: nil)
+            return
+        }
+        
+        let speedTask: () -> Void = {
+            
+            self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+            let (result, errMessage) = OrderUtils.shareInstance().doSpeedUpOneToServer(self.appDelegate.tableNo, order: order, operId: self.appDelegate.operId)
+            
+            self.hideProgressView()
+            if !result {
+                
+                showSimpleAlertView(self, title: "催菜失败", message: errMessage)
+            } else {
+                
+                showSimpleAlertView(self, title: "催菜成功", message: nil)
+            }
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    speedTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            speedTask()
+        }
+        
+    }
+    
+    //MARK: 整单催菜
+    func speedUpAllDish() {
+        
+        let speedTask: () -> Void = {
+            
+            self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+            let (result, errMessage) = OrderUtils.shareInstance().doSpeedUpAllToServer(self.appDelegate.tableNo, operId: self.appDelegate.operId)
+            
+            self.hideProgressView()
+            if !result {
+                
+                showSimpleAlertView(self, title: "催菜失败", message: errMessage)
+            } else {
+                
+                showSimpleAlertView(self, title: "催菜成功", message: nil)
+            }
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    speedTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            speedTask()
+        }
+    }
+    
+    ///MARK: 沽清菜品
+    func showDishWarn() {
+        
+        if let parentController = self.parentViewController {
+            
+            showProcessView("请稍后", message: "正在查询...", progressVisiable: false, progress: 0)
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), { [unowned self]() -> Void in
+                OrderUtils.shareInstance().queryDishWarm(nil){
+                    (result: Bool, errMessage: String?, warns:[DishWarn]?) in
+                    dispatch_async(dispatch_get_main_queue(), { () -> Void in
+                        self.hideProgressView()
+                        if !result {
+                            showSimpleAlertView(self, title: "查询失败", message: errMessage)
+                        } else {
+                            let dishWarnViewController = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("DishWarnViewController") as! DishWarnViewController
+                            
+                            
+                            dishWarnViewController.completeHandler = {
+                                
+                                parentController.dismissViewControllerAnimated(true, completion: nil)
+                            }
+                            
+                            dishWarnViewController.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+                            parentController.presentViewController(dishWarnViewController, animated: true, completion: nil)
+                        }
+                    })
+                }
+            })
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    ///MARK: 整单折扣
+    func billDiscount() {
+        
+        if remoteOrderdishs.count == 0 {
+            
+            showSimpleAlertView(self, title: "未查单或不存在已落单的菜品", message: "整单折扣只对已落单的菜品有效")
+            return
+        }
+        
+        if orderAction.orderDishs.count != 0 {
+            
+            showSimpleAlertView(self, title: "存在未落单的菜品", message: "整单折扣只对已落单的菜品有效")
+            return
+        }
+        
+        let setDiscountTask: () -> Void = {
+            
+            if let parentController = self.parentViewController {
+                
+                let controller = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("NumberInputViewController") as! NumberInputViewController
+                
+                controller.titleStr = "整单折扣"
+                controller.placeholder = "请输入折扣值，例如85，代表八五折，最大输入值为99"
+                controller.maxValue = 99
+                controller.decimalLength = 0
+                controller.complateHandler = {
+                    (cancel, inputStr) in
+                    
+                    controller.dismissViewControllerAnimated(true) {
+                        
+                        if cancel {
+                            return
+                        }
+                        
+                        if let discount = inputStr?.doubleValue {
+                            
+                            
+                            self.showProcessView("请稍后", message: "正在发送数据", progressVisiable: false, progress: 0)
+                            let (result, errMessage) = OrderUtils.shareInstance().doDishDiscountToServer(self.appDelegate.tableNo, dishNewDisc: discount, operId: self.appDelegate.operId)
+                            self.hideProgressView()
+                            if !result {
+                                showSimpleAlertView(self, title: "整单折扣失败", message: errMessage)
+                            } else {
+                                showSimpleAlertView(self, title: "操作成功", message: errMessage)
+                            }
+                        }
+                    }
+                }
+                
+                controller.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+                parentController.presentViewController(controller, animated: true, completion: nil)
+                
+            } else {
+                debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+            }
+            
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    setDiscountTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            setDiscountTask()
+        }
+        
+        
+    }
+    
+    ///MARK: 出品
+    func orderServing() {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        let numberOfSections = dishTableView.numberOfSections()
+        if !(numberOfSections == 2 && indexPath!.section == 0) {
+            
+            showSimpleAlertView(self, title: "未落单菜品不能出品划菜", message: nil)
+            return
+        }
+        
+        let order = remoteOrderdishs[indexPath!.row]
+        if order.suitFlag == "P" {
+            showSimpleAlertView(self, title: "套菜主菜不能出品", message: "请选中套菜的明细进行出品")
+            return
+        }
+        
+        let servingTask: () -> Void = {
+            
+            self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+            let (result, errMessage) = OrderUtils.shareInstance().doOrderServingToServer(self.appDelegate.tableNo, order: order, operId: self.appDelegate.operId)
+            
+            if !result {
+                self.hideProgressView()
+                showSimpleAlertView(self, title: "出品划菜失败", message: errMessage)
+            } else {
+                self.showProcessView("请稍候", message: "正在更新数据...", progressVisiable: false, progress: 0.0)
+                let (result, errMessage) = OrderUtils.shareInstance().queryRemoteBill(self.appDelegate.tableNo, dishOrders: &self.remoteOrderdishs)
+                
+                self.hideProgressView()
+                if !result {
+                    self.remoteOrderdishs.removeAll(keepCapacity: false)
+                    showSimpleAlertView(self, title: "出品划菜已成功，但更新已点菜品信息失败", message: errMessage)
+                } else {
+                    self.dishTableView.reloadData()
+                    self.updateInfo()
+                    self.dishTableView.selectRowAtIndexPath(indexPath!, animated: true, scrollPosition: UITableViewScrollPosition.Top)
+                    self.refreshFunctionCollectionView(indexPath!)
+                    showSimpleAlertView(self, title: "出品划菜成功", message: errMessage)
+                }
+                
+            }
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    servingTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            servingTask()
+        }
+    }
+    
+    ///MARK: 称重
+    func dishWeight() {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        
+        let numberOfSections = dishTableView.numberOfSections()
+        if !(numberOfSections == 2 && indexPath!.section == 0) {
+            showSimpleAlertView(self, title: "未落单菜品不能称重", message: nil)
+            return
+        }
+        
+        let order = remoteOrderdishs[indexPath!.row]
+        if order.editnumFlag != "Y" && order.doubleMaterials.count == 0 {
+            showSimpleAlertView(self, title: "所选菜品未设置称重", message: nil)
+            return
+        }
+        
+        let weightTask: () -> Void = {
+            //不需要进行原料称重
+            if order.doubleMaterials.count == 0 {
+                
+                if let parentController = self.parentViewController {
+                    
+                    let controller = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("NumberInputViewController") as! NumberInputViewController
+                    
+                    controller.titleStr = "菜品称重"
+                    controller.placeholder = "请输入称重数量，最大输入值为999"
+                    controller.maxValue = 999
+                    controller.complateHandler = {
+                        (cancel, inputStr) in
+                        
+                        controller.dismissViewControllerAnimated(true) {
+                            
+                            if cancel {
+                                return
+                            }
+                            
+                            if let qnty = inputStr?.doubleValue {
+                                
+                                self.showProcessView("请稍后", message: "正在发送数据", progressVisiable: false, progress: 0)
+                                let (result, errMessage) = OrderUtils.shareInstance().dishWeightToServer(self.appDelegate.operId, tableNo: self.appDelegate.tableNo, intId: order.pkId, weight: qnty, originMaterials: nil)
+                                self.hideProgressView()
+                                if !result {
+                                    showSimpleAlertView(self, title: "菜品称重失败", message: errMessage)
+                                } else {
+                                    showSimpleAlertView(self, title: "操作成功", message: errMessage)
+                                    order.editnumFlag = "N"
+                                    order.dishQnty = qnty
+                                    self.refresh()
+                                }
+                            }
+                        }
+                    }
+                    
+                    controller.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+                    parentController.presentViewController(controller, animated: true, completion: nil)
+                    
+                } else {
+                    debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+                }
+                
+            } else { //需要原料称重
+                
+                if let parentController = self.parentViewController {
+                    
+                    let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("DishWeightViewController") as! DishWeightViewController
+                    
+                    controller.dishOrder = order
+                    controller.completeHandler = { (cancel) in
+                        parentController.dismissViewControllerAnimated(true) {
+                            
+                            if !cancel {
+                                self.showProcessView("请稍后", message: "正在发送数据", progressVisiable: false, progress: 0)
+                                let (result, errMessage) = OrderUtils.shareInstance().dishWeightToServer(self.appDelegate.operId, tableNo: self.appDelegate.tableNo, intId: order.pkId, weight: order.dishQnty, originMaterials: order.doubleMaterials)
+                                self.hideProgressView()
+                                if !result {
+                                    showSimpleAlertView(self, title: "菜品称重失败", message: errMessage)
+                                } else {
+                                    showSimpleAlertView(self, title: "操作成功", message: errMessage)
+                                    order.editnumFlag = "N"
+                                    self.refresh()
+                                }
+                            }
+                        }
+                        
+                    }
+                    
+                    controller.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+                    parentController.presentViewController(controller, animated: true, completion: nil)
+                    
+                } else {
+                    debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+                }
+            }
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    weightTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            weightTask()
+        }
+    }
+    
+    ///MARK: 转菜
+    func moveDish() {
+        
+        let indexPath = dishTableView.indexPathForSelectedRow()
+        if indexPath == nil {
+            showSimpleAlertView(self, title: "请选中一个菜品", message: nil)
+            return
+        }
+        let numberOfSections = dishTableView.numberOfSections()
+        if !(numberOfSections == 2 && indexPath!.section == 0) {
+            
+            showSimpleAlertView(self, title: "未落单菜品不能转菜", message: nil)
+            return
+        }
+        
+        var order = remoteOrderdishs[indexPath!.row]
+        
+        if order.suitFlag == "Y" {
+            showSimpleAlertView(self, title: "套菜子菜不能单独转菜", message: nil)
+            return
+        }
+        
+        if order.seatFlag == "S" {
+            showSimpleAlertView(self, title: "一品多吃子菜不能单独转菜", message: nil)
+            return
+        }
+        
+        if order.seatFlag == "B" {
+            showSimpleAlertView(self, title: "拼菜子菜不能单独转菜", message: nil)
+            return
+        }
+        
+        if order.presentFlag == "A" {
+            showSimpleAlertView(self, title: "买赠菜品不能单独转菜", message: nil)
+            return
+        }
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("MoveDishViewController") as! MoveDishViewController
+            
+            controller.dishOrder = order
+            controller.completeHandler = {
+                [unowned self](cancel: Bool) in
+                
+                controller.view.removeFromSuperview()
+                if !cancel {
+                    self.showProcessView("请稍候", message: "正在更新数据...", progressVisiable: false, progress: 0.0)
+                    let (result, errMessage) = OrderUtils.shareInstance().queryRemoteBill(self.appDelegate.tableNo, dishOrders: &self.remoteOrderdishs)
+                    
+                    self.hideProgressView()
+                    if !result {
+                        self.remoteOrderdishs.removeAll(keepCapacity: false)
+                        showSimpleAlertView(self, title: "转菜已成功，但更新已点菜品信息失败", message: errMessage)
+                    } else {
+                        self.refresh()
+                        showSimpleAlertView(self, title: "操作成功", message: errMessage)
+                    }
+                }
+            }
+            
+            parentController.addChildViewController(controller)
+            controller.view.frame = parentController.view.frame
+            parentController.view.addSubview(controller.view)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+        
+    }
+    
+    //MARK: 临时套菜
+    func createTempSuit() {
+        
+        if orderAction.orderDishs.count == 0 {
+            
+            showSimpleAlertView(self, title: "不存在未落单的菜品", message: "无法创建临时套菜")
+            return
+        }
+        
+        let tempSuitTask: () -> Void = {
+            
+            if let parentController = self.parentViewController {
+                
+                let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("TempSuitViewController") as! TempSuitViewController
+                controller.completeHandler = {
+                    (cancel, price, memo) in
+                    
+                    controller.view.removeFromSuperview()
+                    if cancel {
+                        return
+                    }
+                    
+                    var order = DishOrder()
+                    
+                    order.pkId     = 0
+                    order.tableNo  = self.appDelegate.tableNo
+                    order.dishNo   = "88888"
+                    order.dishName = "临时套菜"
+                    order.dishSpec = memo ?? ""
+                    order.suitFlag = "P"
+                    order.suitNo   = ""
+                    order.suitAddPrice = 0.0
+                    order.seatFlag = "N"
+                    order.seatDishNo = ""
+                    order.presentFlag = "N"
+                    order.presentOperId = ""
+                    order.suspendFlag = "N"
+                    order.unitNo   = ""
+                    order.unitName = "份"
+                    order.curFlag = "N"
+                    order.editnumFlag = "N"
+                    order.eatFlag = "N"
+                    order.spellFlag = "N"
+                    order.dishQnty = 1.0
+                    order.salePrice = price!
+                    order.addPrice = 0.0
+                    order.operId  = self.appDelegate.operId
+                    order.specialFlag = "N"
+                    
+                    order.pkId = self.dal.queryMAXDishOrderPkId(order)
+                    
+                    let collection = self.orderAction.orderDishs.filter(){$0.suitFlag == "Y"}
+                    for dishOrder in collection {
+                        let index = find(self.orderAction.orderDishs, dishOrder)!
+                        self.orderAction.orderDishs.removeAtIndex(index)
+                    }
+                    var isAllSuspend = true
+                    for dishOrder in self.orderAction.orderDishs {
+                        dishOrder.suitFlag = "Y"
+                        dishOrder.suitNo = "88888"
+                        dishOrder.salePrice = 0.0
+                        dishOrder.presentFlag = "N"
+                        dishOrder.specialFlag = "N"
+                        if dishOrder.suspendFlag == "N" {
+                            isAllSuspend = false
+                        }
+                    }
+                    
+                    if isAllSuspend {
+                        order.suspendFlag = "Y"
+                    }
+                    
+                    self.orderAction.orderDishs.insert(order, atIndex: 0)
+                    
+                    self.showProcessView("请稍候", message: "正在发送数据...")
+                    let (result, errMessage) = OrderUtils.shareInstance().sendOrdersToServer(self.orderAction.orderDishs, operId: self.appDelegate.operId)
+                    self.hideProgressView()
+                    if result == 0 {
+                        showSimpleAlertView(self, title: "创建临时套菜成功并落单成功", message: nil)
+                        self.orderAction.orderDishs.removeAll(keepCapacity: false)
+                        self.delegate?.dataHaveChangedByOrderDetailView(self)
+                        self.delegate?.orderDetailViewShouldExit(self)
+                    } else if result == 1 {
+                        self.orderAction.getLocalOrders()
+                        showSimpleAlertView(self, title: "创建临时套菜成功后落单失败，操作已撤销", message: errMessage)
+                        self.dishTableView.reloadData()
+                    } else if result == 2 {
+                        ///Begin
+                        GeneralAlertView.shareInstance().showDestructiveAlertView(self, title: "创建临时套菜成功后落单失败", message: "未开台不能落单", cancelTitle: "取消", confirmTitle: "开台", actionHandler: { (action) -> Void in
+                            if action == "开台" {
+                                if let parentController = self.parentViewController {
+                                    
+                                    let openTableViewController = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("OpenTableViewController") as! OpenTableViewController
+                                    
+                                    let oldTableNo = self.appDelegate.tableNo
+                                    openTableViewController.completeHandler = {
+                                        [unowned self](cancel: Bool) in
+                                        
+                                        openTableViewController.view.removeFromSuperview()
+                                        if !cancel {
+                                            if oldTableNo != self.appDelegate.tableNo {
+                                                self.dal.setSysParam("tableNo", value: self.appDelegate.tableNo)
+                                                
+                                                ///改变桌台后需要刷新数据
+                                                if oldTableNo.isEmpty {
+                                                    
+                                                    self.dal.beginTransaction()
+                                                    for dishOrder in self.orderAction.orderDishs {
+                                                        dishOrder.tableNo = self.appDelegate.tableNo
+                                                        self.dal.updateOrderTableNo(dishOrder)
+                                                    }
+                                                    self.dal.commitTransaction()
+                                                    
+                                                }
+                                                
+                                                self.orderAction.getLocalOrders()
+                                                self.remoteOrderdishs.removeAll(keepCapacity: false)
+                                                self.refresh()
+                                                self.delegate?.dataHaveChangedByOrderDetailView(self)
+                                            }
+                                            
+                                            self.showProcessView("请稍候", message: "正在发送落单数据...")
+                                            let (result, errMessage) = OrderUtils.shareInstance().sendOrdersToServer(self.orderAction.orderDishs, operId: self.appDelegate.operId, preOrderCellPhone: nil)
+                                            self.hideProgressView()
+                                            
+                                            if result == 0 {
+                                                
+                                                showSimpleAlertView(self, title: "创建临时套菜成功并落单成功", message: nil)
+                                                self.orderAction.orderDishs.removeAll(keepCapacity: false)
+                                                self.delegate?.dataHaveChangedByOrderDetailView(self)
+                                                self.delegate?.orderDetailViewShouldExit(self)
+                                                
+                                            } else if result == 1 {
+                                                
+                                                self.orderAction.getLocalOrders()
+                                                showSimpleAlertView(self, title: "创建临时套菜成功后落单失败，操作已撤销", message: errMessage)
+                                                self.dishTableView.reloadData()
+                                            }
+                                        }
+                                    }
+                                    
+                                    parentController.addChildViewController(openTableViewController)
+                                    openTableViewController.view.frame = parentController.view.frame
+                                    parentController.view.addSubview(openTableViewController.view)
+                                    
+                                } else {
+                                    debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+                                }
+                            } else {
+                                self.orderAction.getLocalOrders()
+                                showSimpleAlertView(self, title: "创建临时套菜成功后落单失败，操作已撤销", message: nil)
+                                self.dishTableView.reloadData()
+                            }
+                        })
+                        ///End
+                    }
+                    self.refresh()
+                }
+                
+                parentController.addChildViewController(controller)
+                controller.view.frame = parentController.view.frame
+                parentController.view.addSubview(controller.view)
+                
+            } else {
+                debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+            }
+            
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    tempSuitTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            tempSuitTask()
+        }
+        
+    }
+    
+    //MARK: 查看账单
+    func showMyBill() {
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("BillQueryViewController") as! BillQueryViewController
+            
+            //parentController.presentViewController(controller, animated: true, completion: nil)
+            parentController.addChildViewController(controller)
+            controller.view.frame = parentController.view.frame
+            parentController.view.addSubview(controller.view)
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    //MARK: 预打账单
+    func prePrintBill() {
+        
+        let printTask: () -> Void = {
+            self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+            dispatch_async(dispatch_get_global_queue(0, 0), { () -> Void in
+                
+                let (result, errMessage) = OrderUtils.shareInstance().printOrdersBill(2, tableNo: self.appDelegate.tableNo, operId: self.appDelegate.operId)
+                dispatch_async(dispatch_get_main_queue(), { () -> Void in
+                    self.hideProgressView()
+                    if !result {
+                        showSimpleAlertView(self, title: "预打账单失败", message: errMessage)
+                    } else {
+                        showSimpleAlertView(self, title: "操作成功", message: nil)
+                    }
+                })
+            })
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    printTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            printTask()
+        }
+    }
+    
+    //MARK: 打印总单
+    func printTotalBill() {
+        
+        let printTask: () -> Void = {
+            self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+            dispatch_async(dispatch_get_global_queue(0, 0), { () -> Void in
+                
+                let (result, errMessage) = OrderUtils.shareInstance().printOrdersBill(3, tableNo: self.appDelegate.tableNo, operId: self.appDelegate.operId)
+                dispatch_async(dispatch_get_main_queue(), { () -> Void in
+                    self.hideProgressView()
+                    if !result {
+                        showSimpleAlertView(self, title: "打印总单失败", message: errMessage)
+                    } else {
+                        showSimpleAlertView(self, title: "操作成功", message: nil)
+                    }
+                })
+            })
+        }
+        
+        if checkWhetherShouldShowLoginDialog() {
+            
+            let parentController = self.parentViewController
+            
+            let loginViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("LoginViewController") as! LoginViewController
+            
+            loginViewController.completeHandler = {
+                [unowned self](actionButton: UIButton, result: Bool?, message: String?) in
+                if actionButton.currentTitle == "取消" {
+                    loginViewController.view.removeFromSuperview()
+                } else if result == true {
+                    loginViewController.view.removeFromSuperview()
+                    printTask()
+                }
+            }
+            
+            parentController!.addChildViewController(loginViewController)
+            loginViewController.view.frame = parentController!.view.frame
+            parentController!.view.addSubview(loginViewController.view)
+            
+        } else {
+            
+            printTask()
+        }
+    }
+    
+    //MARK: 客评
+    func evaluate() {
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("EvaluateViewController") as! EvaluateViewController
+            
+            controller.completeHandler = {
+                [unowned self](cancel: Bool) in
+                
+                controller.view.removeFromSuperview()
+                if !cancel {
+                    showSimpleAlertView(self, title: "评价成功", message: "感谢您的参与")
+                }
+            }
+            
+            parentController.addChildViewController(controller)
+            controller.view.frame = parentController.view.frame
+            parentController.view.addSubview(controller.view)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    //MARK: 会员信息
+    func memberQuery() {
+        
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Widget", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("MemberQueryViewController") as! MemberQueryViewController
+            
+            controller.completeHandler = {
+                controller.view.removeFromSuperview()
+            }
+            
+            parentController.addChildViewController(controller)
+            controller.view.frame = parentController.view.frame
+            parentController.view.addSubview(controller.view)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    //MARK: 预点菜单
+    func loadPreOrderBill() {
+        
+        if orderAction.orderDishs.count != 0 {
+            showSimpleAlertView(self, title: "当前已有点菜，不能引用预点菜单", message: nil)
+            return
+        }
+        if let parentController = self.parentViewController {
+            
+            let controller = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("NumberInputViewController") as! NumberInputViewController
+            
+            controller.titleStr = "导入预点菜单"
+            controller.placeholder = "请输入预点菜时设置的电话号码"
+            controller.inputType = NumberInputType.phone
+            controller.complateHandler = {
+                (cancel, inputStr) in
+                
+                controller.dismissViewControllerAnimated(true) {
+                    
+                    if cancel {
+                        return
+                    }
+                    
+                    self.showProcessView("请稍后", message: "正在发送数据...", progressVisiable: false, progress: 0)
+                    let (result, billNo, errMessage) = OrderUtils.shareInstance().fetchPreOrderBillData(inputStr!, resultArray: &self.orderAction.orderDishs)
+                    
+                    if !result {
+                        self.hideProgressView()
+                        showSimpleAlertView(self, title: "引用预点菜单失败", message: errMessage)
+                        return
+                    } else {
+                        self.settlePreOrderData()
+                        let (result, errMessage) = OrderUtils.shareInstance().endPreOrderRequre(billNo!, operId: self.appDelegate.operId)
+                        self.hideProgressView()
+                        if !result {
+                            showSimpleAlertView(self, title: "更新预点菜单状态失败", message: errMessage)
+                        }
+                    }
+                    self.delegate?.dataHaveChangedByOrderDetailView(self)
+                }
+            }
+            
+            controller.modalPresentationStyle = UIModalPresentationStyle.FormSheet
+            parentController.presentViewController(controller, animated: true, completion: nil)
+            
+        } else {
+            debugPrintln(__FUNCTION__, "出现了未知错误，找不到父控制器")
+        }
+    }
+    
+    //处理预点菜单的数据
+    func settlePreOrderData() {
+        
+        dal.beginTransaction()
+        for (index, order) in enumerate(orderAction.orderDishs) {
+            
+            //套菜子菜
+            if order.suitFlag == "Y" {
+                
+                //往前找
+                for var index = index-1; index >= 0; --index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.suitFlag == "P" {
+                        let pkId = dal.queryMAXDishOrderPkId(dishOrder)
+                        order.fkEat = pkId
+                        order.seatDishNo = dishOrder.dishNo
+                        break
+                    }
+                }
+            }
+            
+            //一品多吃子菜
+            if order.seatFlag == "S" {
+                //往前找
+                for var index = index-1; index >= 0; --index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.seatFlag == "E" {
+                        let pkId = dal.queryMAXDishOrderPkId(dishOrder)
+                        order.fkEat = pkId
+                        order.seatDishNo = dishOrder.dishNo
+                        break
+                    }
+                }
+            }
+            
+            //拼菜子菜
+            if order.seatFlag == "B" {
+                //往前找
+                for var index = index-1; index >= 0; --index {
+                    let dishOrder = self.orderAction.orderDishs[index]
+                    if dishOrder.seatFlag == "A" {
+                        let pkId = dal.queryMAXDishOrderPkId(dishOrder)
+                        order.fkEat = pkId
+                        order.seatDishNo = dishOrder.dishNo
+                        break
+                    }
+                }
+            }
+            
+            if order.presentFlag != "A" {
+                dal.addDishOrder(order)
+                let pkid = dal.queryMAXDishOrderPkId(order)
+                order.pkId = pkid
+                let makeMaterials = order.makeMemos + order.materials
+                dal.addDishMakeMemoOrderPkId(order.pkId, dishMakeMemoArray: makeMaterials)
+            }
+            
+        }
+        dal.commitTransaction()
+        
+        orderAction.orderDishs.removeAll(keepCapacity: false)
+        orderAction.getLocalOrders()
+        self.refresh()
+    }
+    
+    //MARK: - Help
+    func updateInfo() {
+        caculateByPresentDish()
+        showTotalInfo()
+    }
+    
+    func showTotalInfo() {
+        
+        var totalAmount = 0.0, totalQnty = 0.0
+        for order in orderAction.orderDishs {
+            if order.presentFlag != "A" && order.presentFlag != "Y" {
+                if order.suitFlag == "Y" {
+                    totalAmount += order.addPrice + order.suitAddPrice
+                } else {
+                    totalAmount += order.dishQnty * order.salePrice + order.addPrice
+                }
+            }
+            totalQnty += order.dishQnty
+        }
+        for order in remoteOrderdishs {
+            if order.presentFlag != "A" && order.presentFlag != "Y" {
+                if order.suitFlag == "Y" {
+                    totalAmount += order.addPrice + order.suitAddPrice
+                } else {
+                    totalAmount += order.dishQnty * order.salePrice + order.addPrice
+                }
+            }
+            totalQnty += order.dishQnty
+        }
+        var amountStr = NSMutableAttributedString(string: "合计:  ", attributes: [NSForegroundColorAttributeName: UIColor.blackColor(), NSFontAttributeName: UIFont.systemFontOfSize(24)])
+        var attriAmount = NSMutableAttributedString(string: formatDecimal(totalAmount), attributes: [NSForegroundColorAttributeName: UIColor.redColor(), NSFontAttributeName: UIFont.boldSystemFontOfSize(24)])
+        var attriYuan = NSMutableAttributedString(string: " 元", attributes: [NSForegroundColorAttributeName: UIColor.blackColor(), NSFontAttributeName: UIFont.systemFontOfSize(24)])
+        amountStr.appendAttributedString(attriAmount)
+        amountStr.appendAttributedString(attriYuan)
+        billAmountLabel.attributedText = amountStr
+        
+        var totalStr = NSMutableAttributedString(string: "数量:  ", attributes: [NSForegroundColorAttributeName: UIColor.blackColor(), NSFontAttributeName: UIFont.systemFontOfSize(19)])
+        var attriTotal = NSMutableAttributedString(string: formatDecimal(totalQnty), attributes: [NSForegroundColorAttributeName: UIColor.redColor(), NSFontAttributeName: UIFont.systemFontOfSize(19)])
+        totalStr.appendAttributedString(attriTotal)
+        dishCountLabel.attributedText = totalStr
+    }
+    
+    ///计算买赠菜品
+    func caculateByPresentDish() {
+        
+        /*//开始统计前删除所有买赠菜品
+        let presentExists = orderAction.orderDishs.filter(){
+        $0.presentFlag == "A"
+        }
+        for dishOrder in presentExists {
+        if let index = find(orderAction.orderDishs, dishOrder) {
+        orderAction.orderDishs.removeAtIndex(index)
+        }
+        }*/
+        
+        var markArray = Array<Bool>(count: (remoteOrderdishs.count+orderAction.orderDishs.count)*2, repeatedValue: false)
+        var unionArray = remoteOrderdishs + orderAction.orderDishs
+        
+        for var index = 0; index < unionArray.count; ++index {
+            let dishOrder = unionArray[index]
+            
+            if markArray[index] == true {//当前菜品已经统计过，继续处理下一个菜品
+                continue
+            }
+            
+            markArray[index] = true
+            
+            //当前菜品已经为赠送菜品或特殊菜品，继续处理下一个菜品
+            if dishOrder.presentFlag == "A" || dishOrder.presentFlag == "Y"
+                || dishOrder.suitFlag == "Y" || dishOrder.seatFlag == "S" {
+                    continue
+            }
+            
+            var dishPresents = [DishPresent]()
+            dal.queryDishPresent(dishOrder.dishNo, dishSpec: dishOrder.dishSpec, dishPresents: &dishPresents)
+            if dishPresents.count == 0 { //没有设置买赠信息，继续处理下一个菜品
+                continue
+            }
+            
+            var count = dishOrder.dishQnty //当前同一编号和规格的菜品已点数量
+            var commitCount = 0.0 //当前同一编号和规格的菜品已落单的点菜数量
+            if dishOrder.isCommit {
+                commitCount = count
+            }
+            
+            ///开始统计当前同一编号和规格的菜品已点数量，并记录最后一个菜品的位置
+            var lastIndex = index
+            for var loopIndex = index + 1; loopIndex < unionArray.count; ++loopIndex {
+                
+                let loopOrder = unionArray[loopIndex]
+                //当前菜品已经为赠送菜品或特殊菜品，继续处理下一个菜品
+                if loopOrder.presentFlag == "A" || loopOrder.presentFlag == "Y"
+                    || loopOrder.suitFlag == "Y" || loopOrder.seatFlag == "S" {
+                        continue
+                }
+                
+                if loopOrder.dishNo == dishOrder.dishNo && loopOrder.dishSpec == dishOrder.dishSpec {
+                    
+                    markArray[loopIndex] = true
+                    count += loopOrder.dishQnty
+                    if loopOrder.isCommit {
+                        commitCount += loopOrder.dishQnty
+                    }
+                    
+                    lastIndex = loopIndex
+                }
+            }
+            
+            //判断当前菜品点菜数量是否达到买赠基数
+            for dishPresent in dishPresents {
+                
+                //达到买赠基数，创建买赠菜品
+                if count >= dishPresent.dishBase {
+                    
+                    //判断买赠的菜品是否已经存在
+                    var existsIndex = -1
+                    var existsPresentOrder: DishOrder? = nil
+                    for var idx = 0; idx < unionArray.count; ++idx {
+                        let tmpOrder = unionArray[idx]
+                        if !tmpOrder.isCommit && tmpOrder.presentDishNo == dishOrder.dishNo && tmpOrder.presentDishSpec == dishOrder.dishSpec {
+                            existsIndex = idx
+                            existsPresentOrder = tmpOrder
+                            break
+                        }
+                    }
+                    //赠送菜品已经存在
+                    if existsIndex != -1 {
+                        //直接修改数量
+                        let temp = (Double)(count / dishPresent.dishBase - commitCount / dishPresent.dishBase)
+                        existsPresentOrder!.dishQnty = dishPresent.presentDishNum * temp
+                        orderAction.updateOrderNum(existsPresentOrder!, num: existsPresentOrder!.dishQnty)
+                    } else {
+                        //赠送菜品不存在，新增菜品
+                        var presentOrder = DishOrder()
+                        presentOrder.tableNo = appDelegate.tableNo
+                        presentOrder.dishNo = dishPresent.presentDishNo
+                        presentOrder.dishSpec = dishPresent.presentDishSpec ?? ""
+                        presentOrder.dishName = dal.queryDishName(dishPresent.presentDishNo) ?? ""
+                        presentOrder.presentDishNo = dishOrder.dishNo
+                        presentOrder.presentDishSpec = dishOrder.dishSpec
+                        let temp = (Double)(count / dishPresent.dishBase - commitCount / dishPresent.dishBase)
+                        presentOrder.dishQnty = dishPresent.presentDishNum * temp
+                        presentOrder.fkEat = dishOrder.pkId
+                        
+                        if let dishInfo = dal.queryDishInfo(presentOrder.dishNo, dishSpec: presentOrder.dishSpec) {
+                            let priceKind = self.dal.queryTablePriceKind(self.appDelegate.tableNo)
+                            var salePrice = dishInfo.salePrice1
+                            if priceKind == 2 {
+                                salePrice = dishInfo.salePrice2
+                            } else if priceKind == 3 {
+                                salePrice = dishInfo.salePrice3
+                            }
+                            let specialPrice = self.dal.getDishSpecialPrice(dishInfo.dishNo, dishSpec: dishInfo.dishSpec, tableNo: self.appDelegate.tableNo)
+                            if (specialPrice >= 0.0 && specialPrice < salePrice) {
+                                salePrice = specialPrice
+                            }
+                            presentOrder.salePrice = salePrice
+                            presentOrder.suitFlag = dishInfo.suitFlag
+                            presentOrder.unitName = dishInfo.unitName
+                        } else {
+                            presentOrder.salePrice = 0.0
+                            presentOrder.suitFlag = "N"
+                            presentOrder.unitName = "份"
+                        }
+                        if presentOrder.suitFlag == "N" {
+                            presentOrder.suitNo = ""
+                        } else {
+                            presentOrder.suitNo = dal.queryDishSuitNo(presentOrder.dishNo) ?? ""
+                        }
+                        presentOrder.suitAddPrice = 0.0;
+                        presentOrder.presentFlag = "A"
+                        presentOrder.presentOperId = ""
+                        presentOrder.suspendFlag = "N"
+                        presentOrder.operId = ""
+                        presentOrder.operDate = NSDate()
+                        
+                        if presentOrder.dishQnty > 0.0 {
+                            
+                            var addOrders = [presentOrder]
+                            
+                            //如果赠送的菜品是套菜，需要增加套菜明细
+                            if presentOrder.suitFlag == "Y" {
+                                
+                                var suitItems = [SuitItem]()
+                                self.dal.querySuitItems(presentOrder.dishNo, suitItems: &suitItems)
+                                for var i = 0; i < suitItems.count; ++i {
+                                    
+                                    self.dal.querySuitDishInfos(self.appDelegate.tableNo, dishSuitNo: presentOrder.dishNo, itemId: suitItems[i].suitItemNo, suitDishInfos: &suitItems[i].suitDishInfos)
+                                }
+                                for suitItem in suitItems {
+                                    let suitDishInfo = suitItem.suitDishInfos.filter(){$0.defaultFlag == "Y"}.first
+                                    if suitDishInfo != nil {
+                                        if let dish = self.dal.queryDishInfo(suitDishInfo!.dishNo, dishSpec: suitDishInfo!.dishSpec) {
+                                            var dishOrder = DishOrder()
+                                            self.dal.initDishOrderValue(&dishOrder, tableNo: self.appDelegate.tableNo, dishInfo: dish)
+                                            dishOrder.suitAddPrice = suitDishInfo!.addPrice
+                                            dishOrder.dishQnty = suitDishInfo!.qnty * presentOrder.dishQnty
+                                            dishOrder.seatDishNo = presentOrder.dishNo
+                                            dishOrder.suitNo = presentOrder.dishNo
+                                            dishOrder.suitFlag = "Y"
+                                            dishOrder.salePrice = 0
+                                            
+                                            addOrders.append(dishOrder)
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            if lastIndex == unionArray.count - 1 {
+                                
+                                unionArray.extend(addOrders)
+                                
+                                orderAction.orderDishs.extend(addOrders)
+                                for _ in 0..<addOrders.count {
+                                    markArray.append(true)
+                                }
+
+                            } else {
+                                unionArray[lastIndex+1..<lastIndex+1] = addOrders[0..<addOrders.count]
+                                markArray[lastIndex+1..<lastIndex+1] = Array<Bool>(count: addOrders.count, repeatedValue: true)[0..<addOrders.count]
+                                
+                                let index = lastIndex - remoteOrderdishs.count + 1
+                                orderAction.orderDishs[index..<index] = addOrders[0..<addOrders.count]
+                            }
+                            
+                            for addOrder in addOrders {
+                                let pkid = dal.queryMAXDishOrderPkid(appDelegate.tableNo)
+                                addOrder.pkId = pkid
+                                orderAction.addBuyPresentDishOrder(addOrder)
+                            }
+                        }
+                    }
+                } else {
+                    
+                    //判断买赠的菜品是否已经存在
+                    var existsIndex = -1
+                    var existsPresentOrder: DishOrder? = nil
+                    for var idx = 0; idx < unionArray.count; ++idx {
+                        let tmpOrder = unionArray[idx]
+                        if !tmpOrder.isCommit && tmpOrder.presentDishNo == dishOrder.dishNo && tmpOrder.presentDishSpec == dishOrder.dishSpec {
+                            existsIndex = idx
+                            existsPresentOrder = tmpOrder
+                            break
+                        }
+                    }
+                    //赠送菜品已经存在
+                    if existsIndex != -1 {
+                        //删除
+                        unionArray.removeAtIndex(existsIndex)
+                        orderAction.removeOrderAtIndex(existsIndex - remoteOrderdishs.count)
+                    }
+                }
+            }
+        }
+    }
+    
+    func checkDishWarn(dishOrder: DishOrder, toQnty: Double) -> Bool {
+        
+        var orderQnty = 0.0
+        for order in orderAction.orderDishs {
+            if order.dishNo == dishOrder.dishNo && order.dishSpec == dishOrder.dishSpec {
+                orderQnty += dishOrder.dishQnty
+            }
+        }
+        //菜品是否已沽清
+        let warnQnty = dal.getDishWarn(dishOrder.dishNo, dishSpec: dishOrder.dishSpec)
+        if warnQnty != -1 && warnQnty < toQnty {
+            let dishName = dishOrder.dishSpec.isEmpty ? dishOrder.dishName : "\(dishOrder.dishName)[\(dishOrder.dishSpec)]"
+            showSimpleAlertView(self, title: "\(dishName)已设置沽清", message: "沽清数量为\(warnQnty)")
+            return false
+        }
+        return true
+    }
+    
+    ///显示进度条
+    func showProcessView(title: String, message: String, progressVisiable: Bool = false, progress: Float = 0) {
+        
+        if let parentController = self.parentViewController {
+            if progressViewController == nil {
+                
+                progressViewController = UIStoryboard(name: "Common", bundle: NSBundle.mainBundle()).instantiateViewControllerWithIdentifier("CustomProgressViewController") as? CustomProgressViewController
+            }
+            
+            if !progressViewController!.isShow {
+                parentController.addChildViewController(progressViewController!)
+                progressViewController?.view.frame = parentController.view.frame
+                parentController.view.addSubview(progressViewController!.view)
+                
+                progressViewController!.isShow = true
+            }
+            progressViewController!.setProgressVisiable(progressVisiable)
+            progressViewController!.updateProgress(progress)
+            progressViewController!.setTitleText(title)
+            progressViewController!.setMessage(message)
+            
+            CATransaction.commit()
+        }
+    }
+    
+    ///隐藏进度条
+    func hideProgressView() {
+        
+        if progressViewController != nil {
+            if progressViewController!.isShow {
+                progressViewController!.removeFromParentViewController()
+                progressViewController!.view.removeFromSuperview()
+                progressViewController!.isShow = false
+            }
+        }
+    }
+    
+    /** 检查是否需要登录
+    *
+    *   return: true 需要登录； false 不需要登录
+    */
+    func checkWhetherShouldShowLoginDialog() -> Bool {
+        
+        let orderMode = dal.querySysParam("orderMode", defaultValue: "0").toInt()!
+        if orderMode == 0 && (appDelegate.operId.isEmpty || appDelegate.operId == "0000" || appDelegate.operId == "***") {
+            return true
+        } else if orderMode == 1 {//半自助点菜
+            return true
+        } else if orderMode == 2 || orderMode == 3 {//全自助点菜和预点菜
+            return false
+        }
+        
+        return false
+    }
+    
+    func refreshFunctionCollectionView(dishIndexPath: NSIndexPath) {
+        
+        let numberOfSections = dishTableView.numberOfSections()
+        if !(numberOfSections == 2 && dishIndexPath.section == 0) {//未落单
+            
+            orderFunctions[0] = "删菜"
+            orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: 0, inSection: 0)])
+            
+            if dishIndexPath.row >= orderAction.orderDishs.count {
+                return
+            }
+            let order = orderAction.orderDishs[dishIndexPath.row]
+            if order.suspendFlag == "Y" {
+                if let index = find(orderFunctions, hungalias) {
+                    orderFunctions[index] = "取消\(hungalias)"
+                    orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: index, inSection: 0)])
+                }
+            } else {
+                if let index = find(orderFunctions, "取消\(hungalias)") {
+                    orderFunctions[index] = hungalias
+                    orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: index, inSection: 0)])
+                }
+            }
+        } else {//已落单
+            
+            orderFunctions[0] = "退菜"
+            orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: 0, inSection: 0)])
+            
+            if let index = find(orderFunctions, "取消\(hungalias)") {
+                orderFunctions[index] = hungalias
+                orderFunctionColletionView.reloadItemsAtIndexPaths([NSIndexPath(forRow: index, inSection: 0)])
+            }
+        }
+    }
+}
